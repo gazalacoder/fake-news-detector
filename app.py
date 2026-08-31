@@ -1,476 +1,321 @@
-from flask import Flask, render_template, request, redirect, send_file
-import joblib
-import re
+from flask import Flask, render_template, request, jsonify, send_file
 import os
-import io
-
-from datetime import datetime
-
+import re
+import joblib
+import nltk
 from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
-
-from reportlab.lib.pagesizes import letter
+from datetime import datetime
+from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
+# -----------------------------
+# NLTK STOPWORDS SETUP
+# -----------------------------
+try:
+    stop_words = set(stopwords.words("english"))
+except LookupError:
+    nltk.download("stopwords", quiet=True)
+    stop_words = set(stopwords.words("english"))
 
+# -----------------------------
+# FLASK APP
+# -----------------------------
 app = Flask(__name__)
 
+# -----------------------------
+# PATHS
+# -----------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# =========================================
-# LOAD TRAINED MODEL
-# =========================================
-
-model = joblib.load("model/fake_news_model.pkl")
-
-vectorizer = joblib.load(
-    "model/tfidf_vectorizer.pkl"
+MODEL_PATH = os.path.join(
+    BASE_DIR,
+    "model",
+    "fake_news_model.pkl"
 )
 
+VECTORIZER_PATH = os.path.join(
+    BASE_DIR,
+    "model",
+    "tfidf_vectorizer.pkl"
+)
 
-# =========================================
-# LOAD MODEL ACCURACY
-# =========================================
+# -----------------------------
+# LOAD MODEL
+# -----------------------------
+model = joblib.load(MODEL_PATH)
+vectorizer = joblib.load(VECTORIZER_PATH)
 
-accuracy = "Not Available"
-
-accuracy_file = "model/model_accuracy.txt"
-
-if os.path.exists(accuracy_file):
-
-    with open(accuracy_file, "r") as file:
-
-        accuracy = file.read().strip()
-
-
-# =========================================
-# PREDICTION HISTORY
-# =========================================
-
-history = []
+# Prediction History
+prediction_history = []
 
 
-# =========================================
-# LATEST RESULT FOR PDF REPORT
-# =========================================
+# -----------------------------
+# TEXT CLEANING
+# -----------------------------
+def clean_text(text):
 
-latest_result = {
-    "news": "",
-    "prediction": "",
-    "confidence": "",
-    "date": ""
-}
+    text = text.lower()
 
+    text = re.sub(r"http\S+|www\S+", "", text)
 
-# =========================================
-# NLP SETUP
-# =========================================
+    text = re.sub(r"[^a-zA-Z\s]", "", text)
 
-stop_words = set(stopwords.words("english"))
-
-lemmatizer = WordNetLemmatizer()
-
-
-# =========================================
-# TEXT PREPROCESSING
-# =========================================
-
-def preprocess_text(text):
-
-    text = str(text).lower()
-
-    # Remove special characters
-    text = re.sub(
-        r"[^a-zA-Z\s]",
-        "",
-        text
-    )
-
-    # Split text into words
     words = text.split()
 
-    # Remove stopwords and apply lemmatization
     words = [
-
-        lemmatizer.lemmatize(word)
-
-        for word in words
-
+        word for word in words
         if word not in stop_words
-
     ]
 
     return " ".join(words)
 
 
-# =========================================
+# -----------------------------
 # HOME PAGE
-# =========================================
-
-@app.route("/", methods=["GET", "POST"])
-
+# -----------------------------
+@app.route("/")
 def home():
-
-    prediction = None
-    confidence = None
-    news_text = ""
-
-    if request.method == "POST":
-
-        news_text = request.form.get(
-            "news",
-            ""
-        )
-
-        if news_text.strip():
-
-            # Clean news text
-            clean_text = preprocess_text(
-                news_text
-            )
-
-            # Convert text into TF-IDF
-            text_vector = vectorizer.transform(
-                [clean_text]
-            )
-
-            # Make prediction
-            prediction = model.predict(
-                text_vector
-            )[0]
-
-            # Calculate confidence
-            probabilities = model.predict_proba(
-                text_vector
-            )[0]
-
-            confidence = round(
-                max(probabilities) * 100,
-                2
-            )
-
-            # Current date and time
-            analyzed_date = datetime.now().strftime(
-                "%d-%m-%Y %I:%M %p"
-            )
-
-            # Save latest prediction
-            latest_result["news"] = news_text
-
-            latest_result["prediction"] = prediction
-
-            latest_result["confidence"] = confidence
-
-            latest_result["date"] = analyzed_date
+    return render_template("index.html")
 
 
-            # Add prediction to history
-            history.insert(
-                0,
-                {
-                    "text": (
-                        news_text[:100] + "..."
-                        if len(news_text) > 100
-                        else news_text
-                    ),
+# -----------------------------
+# PREDICT NEWS
+# -----------------------------
+@app.route("/predict", methods=["POST"])
+def predict():
 
-                    "prediction": prediction,
+    data = request.get_json()
 
-                    "confidence": confidence,
+    if not data or "news" not in data:
+        return jsonify({
+            "error": "Please enter news text."
+        })
 
-                    "date": analyzed_date
-                }
-            )
+    news = data["news"].strip()
 
+    if not news:
+        return jsonify({
+            "error": "Please enter news text."
+        })
 
-            # Keep only last 5 predictions
-            if len(history) > 5:
+    # Clean text
+    cleaned_news = clean_text(news)
 
-                history.pop()
+    # Convert into TF-IDF
+    news_vector = vectorizer.transform([cleaned_news])
 
+    # Prediction
+    prediction = model.predict(news_vector)[0]
 
-    return render_template(
+    # Probability / Confidence
+    probability = model.predict_proba(news_vector)[0]
 
-        "index.html",
+    confidence = round(max(probability) * 100, 2)
 
-        prediction=prediction,
+    # Handle different dataset labels
+    if prediction == 1 or str(prediction).lower() == "real":
+        result = "REAL"
+    else:
+        result = "FAKE"
 
-        confidence=confidence,
-
-        news_text=news_text,
-
-        history=history,
-
-        accuracy=accuracy
-
+    # Date and Time
+    current_time = datetime.now().strftime(
+        "%d %B %Y, %I:%M %p"
     )
 
+    # Save history
+    history_item = {
+        "news": news,
+        "result": result,
+        "confidence": confidence,
+        "time": current_time
+    }
 
-# =========================================
+    prediction_history.insert(0, history_item)
+
+    # Keep only last 20 predictions
+    if len(prediction_history) > 20:
+        prediction_history.pop()
+
+    return jsonify({
+        "result": result,
+        "confidence": confidence,
+        "time": current_time
+    })
+
+
+# -----------------------------
+# GET HISTORY
+# -----------------------------
+@app.route("/history")
+def history():
+
+    return jsonify(prediction_history)
+
+
+# -----------------------------
 # CLEAR HISTORY
-# =========================================
-
-@app.route("/clear-history")
-
+# -----------------------------
+@app.route("/clear-history", methods=["POST"])
 def clear_history():
 
-    history.clear()
+    prediction_history.clear()
 
-    return redirect("/")
+    return jsonify({
+        "message": "History cleared successfully."
+    })
 
 
-# =========================================
-# DOWNLOAD PDF REPORT
-# =========================================
-
-@app.route("/download-report")
-
+# -----------------------------
+# PDF REPORT
+# -----------------------------
+@app.route("/download-report", methods=["POST"])
 def download_report():
 
-    # If no prediction exists
-    if not latest_result["prediction"]:
+    data = request.get_json()
 
-        return redirect("/")
+    news = data.get("news", "")
+    result = data.get("result", "")
+    confidence = data.get("confidence", "")
+    time = data.get(
+        "time",
+        datetime.now().strftime("%d %B %Y, %I:%M %p")
+    )
 
-
-    # Create PDF in memory
-    buffer = io.BytesIO()
-
+    report_path = os.path.join(
+        BASE_DIR,
+        "fake_news_report.pdf"
+    )
 
     pdf = canvas.Canvas(
-
-        buffer,
-
-        pagesize=letter
-
+        report_path,
+        pagesize=A4
     )
 
+    width, height = A4
 
-    width, height = letter
-
-
-    # =====================================
-    # PDF TITLE
-    # =====================================
-
-    pdf.setFont(
-        "Helvetica-Bold",
-        20
-    )
+    # Title
+    pdf.setFont("Helvetica-Bold", 20)
 
     pdf.drawString(
-
         50,
-
         height - 60,
-
-        "Fake News Detector Report"
-
+        "Fake News Detection Report"
     )
 
-
-    # =====================================
-    # REPORT DETAILS
-    # =====================================
-
-    pdf.setFont(
-        "Helvetica",
-        12
-    )
-
+    # Date
+    pdf.setFont("Helvetica", 11)
 
     pdf.drawString(
-
         50,
-
-        height - 110,
-
-        f"Prediction: {latest_result['prediction']}"
-
+        height - 100,
+        f"Date & Time: {time}"
     )
 
+    # Result
+    pdf.setFont("Helvetica-Bold", 14)
 
     pdf.drawString(
-
         50,
-
         height - 140,
-
-        f"Confidence: {latest_result['confidence']}%"
-
+        f"Prediction: {result}"
     )
 
-
     pdf.drawString(
-
         50,
-
         height - 170,
-
-        f"Model Accuracy: {accuracy}%"
-
+        f"Confidence: {confidence}%"
     )
 
+    # News Text
+    pdf.setFont("Helvetica-Bold", 13)
 
     pdf.drawString(
-
         50,
-
-        height - 200,
-
-        f"Analyzed On: {latest_result['date']}"
-
+        height - 220,
+        "News Text:"
     )
 
+    pdf.setFont("Helvetica", 10)
 
-    # =====================================
-    # ANALYZED NEWS
-    # =====================================
-
-    pdf.setFont(
-        "Helvetica-Bold",
-        12
-    )
-
-
-    pdf.drawString(
-
-        50,
-
-        height - 250,
-
-        "Analyzed News:"
-
-    )
-
-
-    pdf.setFont(
-        "Helvetica",
-        11
-    )
-
-
-    news = latest_result["news"]
-
+    # Simple text wrapping
     words = news.split()
 
     line = ""
+    y_position = height - 250
 
-    y = height - 280
-
-
-    # Split long news into multiple lines
     for word in words:
 
         test_line = line + word + " "
 
-
         if pdf.stringWidth(
-
             test_line,
-
             "Helvetica",
-
-            11
-
-        ) < width - 100:
+            10
+        ) < 500:
 
             line = test_line
-
 
         else:
 
             pdf.drawString(
-
                 50,
-
-                y,
-
+                y_position,
                 line
-
             )
 
-
-            y -= 20
+            y_position -= 20
 
             line = word + " "
 
-
-            # Create new page if needed
-            if y < 70:
+            # New page if needed
+            if y_position < 60:
 
                 pdf.showPage()
 
-                y = height - 60
+                y_position = height - 60
 
                 pdf.setFont(
                     "Helvetica",
-                    11
+                    10
                 )
 
-
-    # Print remaining text
     if line:
 
         pdf.drawString(
-
             50,
-
-            y,
-
+            y_position,
             line
-
         )
 
-
-    # =====================================
-    # FOOTER
-    # =====================================
-
+    # Footer
     pdf.setFont(
-
         "Helvetica-Oblique",
-
         9
-
     )
-
 
     pdf.drawString(
-
         50,
-
         40,
-
-        "Generated using Machine Learning and NLP."
-
+        "Generated by Fake News Detector"
     )
 
-
-    # Save PDF
     pdf.save()
 
-
-    buffer.seek(0)
-
-
-    # Send PDF to user
     return send_file(
-
-        buffer,
-
+        report_path,
         as_attachment=True,
-
-        download_name="fake_news_report.pdf",
-
-        mimetype="application/pdf"
-
+        download_name="fake_news_report.pdf"
     )
 
 
-# =========================================
-# RUN APPLICATION
-# =========================================
-
+# -----------------------------
+# RUN APP
+# -----------------------------
 if __name__ == "__main__":
 
-    app.run(debug=True)
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True
+    )
